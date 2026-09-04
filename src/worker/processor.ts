@@ -1,10 +1,12 @@
-import type { Client } from '@elastic/elasticsearch';
 import type { Produto } from '../types.js';
 import type { ProdutoSyncJobData } from '../queue/queue.js';
 
 export interface ProcessorDeps {
   findProdutoById: (id: string) => Promise<Produto | null>;
-  esClient: { index: Client['index']; delete: Client['delete'] };
+  esClient: {
+    index: (params: { index: string; id: string; document: Produto }) => Promise<unknown>;
+    delete: (params: { index: string; id: string }) => Promise<unknown>;
+  };
   indexName: string;
 }
 
