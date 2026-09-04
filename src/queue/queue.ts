@@ -11,18 +11,36 @@ export interface ProdutoSyncJobData {
 
 const connection = createQueueConnection(loadConfig().redisUrl);
 
-export const produtosSyncQueue = new Queue<ProdutoSyncJobData>(PRODUTOS_SYNC_QUEUE, {
-  connection,
-  defaultJobOptions: {
-    attempts: 5,
-    backoff: { type: 'exponential', delay: 1000 },
-  },
-});
-
-export async function enqueueIndex(produtoId: string): Promise<void> {
-  await produtosSyncQueue.add('sync', { produtoId, operacao: 'index' });
+/**
+ * Factory for a produtos-sync queue bound to a given queue name. Production
+ * code uses the default (shared) queue name via `produtosSyncQueue` below;
+ * tests that need isolation from other test files can create their own
+ * differently-named queue with this factory instead.
+ */
+export function createProdutosSyncQueue(queueName: string = PRODUTOS_SYNC_QUEUE): Queue<ProdutoSyncJobData> {
+  return new Queue<ProdutoSyncJobData>(queueName, {
+    connection,
+    defaultJobOptions: {
+      attempts: 5,
+      backoff: { type: 'exponential', delay: 1000 },
+      removeOnComplete: { count: 1000 },
+      removeOnFail: { count: 1000 },
+    },
+  });
 }
 
-export async function enqueueDelete(produtoId: string): Promise<void> {
-  await produtosSyncQueue.add('sync', { produtoId, operacao: 'delete' });
+export const produtosSyncQueue = createProdutosSyncQueue();
+
+export async function enqueueIndex(
+  produtoId: string,
+  queue: Queue<ProdutoSyncJobData> = produtosSyncQueue
+): Promise<void> {
+  await queue.add('sync', { produtoId, operacao: 'index' });
+}
+
+export async function enqueueDelete(
+  produtoId: string,
+  queue: Queue<ProdutoSyncJobData> = produtosSyncQueue
+): Promise<void> {
+  await queue.add('sync', { produtoId, operacao: 'delete' });
 }

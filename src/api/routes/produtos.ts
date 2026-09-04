@@ -29,7 +29,7 @@ export function createProdutosRouter(deps: ProdutosRouterDeps): Router {
     try {
       const produto = await deps.repo.createProduto(parsed.data);
       deps.queue.enqueueIndex(produto.id).catch((err) =>
-        console.error(JSON.stringify({ level: 'error', msg: 'failed to enqueue index job', produtoId: produto.id, error: err.message }))
+        console.error(JSON.stringify({ level: 'error', msg: 'failed to enqueue index job', produtoId: produto.id, error: (err as Error)?.message }))
       );
       res.status(201).json(produto);
     } catch (err) {
@@ -50,7 +50,7 @@ export function createProdutosRouter(deps: ProdutosRouterDeps): Router {
         return;
       }
       deps.queue.enqueueIndex(produto.id).catch((err) =>
-        console.error(JSON.stringify({ level: 'error', msg: 'failed to enqueue index job', produtoId: produto.id, error: err.message }))
+        console.error(JSON.stringify({ level: 'error', msg: 'failed to enqueue index job', produtoId: produto.id, error: (err as Error)?.message }))
       );
       res.status(200).json(produto);
     } catch (err) {
@@ -66,7 +66,7 @@ export function createProdutosRouter(deps: ProdutosRouterDeps): Router {
         return;
       }
       deps.queue.enqueueDelete(req.params.id).catch((err) =>
-        console.error(JSON.stringify({ level: 'error', msg: 'failed to enqueue delete job', produtoId: req.params.id, error: err.message }))
+        console.error(JSON.stringify({ level: 'error', msg: 'failed to enqueue delete job', produtoId: req.params.id, error: (err as Error)?.message }))
       );
       res.status(204).send();
     } catch (err) {

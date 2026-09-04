@@ -6,13 +6,19 @@ import { pool } from '../../src/db/pool.js';
 import { runMigrations } from '../../src/db/migrate.js';
 import { esClient } from '../../src/es/client.js';
 import { ensureProdutosIndex } from '../../src/es/setup.js';
-import { produtosSyncQueue } from '../../src/queue/queue.js';
+import { createProdutosSyncQueue, enqueueIndex, enqueueDelete } from '../../src/queue/queue.js';
 import { createProdutoSyncWorker } from '../../src/worker/produtoSyncWorker.js';
 import { createApp } from '../../src/api/app.js';
 import { SearchUnavailableError } from '../../src/api/searchClient.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const testIndex = 'produtos_api_test';
+const testQueueName = 'produtos-sync-api-test';
+const testQueue = createProdutosSyncQueue(testQueueName);
+const testQueueDeps = {
+  enqueueIndex: (produtoId: string) => enqueueIndex(produtoId, testQueue),
+  enqueueDelete: (produtoId: string) => enqueueDelete(produtoId, testQueue),
+};
 let worker: ReturnType<typeof createProdutoSyncWorker>;
 
 async function waitFor(check: () => Promise<boolean>, timeoutMs = 8000): Promise<void> {
@@ -36,14 +42,14 @@ beforeEach(async () => {
 
 afterAll(async () => {
   if (worker) await worker.close();
-  await produtosSyncQueue.obliterate({ force: true });
-  await produtosSyncQueue.close();
+  await testQueue.obliterate({ force: true });
+  await testQueue.close();
   await pool.end();
 });
 
 describe('POST /produtos', () => {
   it('creates a produto and returns 201', async () => {
-    const app = createApp();
+    const app = createApp({ queue: testQueueDeps });
     const res = await request(app)
       .post('/produtos')
       .send({ sku: 'A-1', nome: 'Mouse', preco: 50 });
@@ -52,15 +58,33 @@ describe('POST /produtos', () => {
   });
 
   it('returns 400 for an invalid payload', async () => {
-    const app = createApp();
+    const app = createApp({ queue: testQueueDeps });
     const res = await request(app).post('/produtos').send({ nome: 'Mouse' });
     expect(res.status).toBe(400);
+  });
+
+  it('returns 400 for a malformed JSON body', async () => {
+    const app = createApp({ queue: testQueueDeps });
+    const res = await request(app)
+      .post('/produtos')
+      .type('json')
+      .send('{"sku": "A-6", invalid}');
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'invalid_json' });
+  });
+
+  it('returns 409 for a duplicate sku', async () => {
+    const app = createApp({ queue: testQueueDeps });
+    await request(app).post('/produtos').send({ sku: 'A-7', nome: 'Mouse', preco: 50 });
+    const res = await request(app).post('/produtos').send({ sku: 'A-7', nome: 'Mouse 2', preco: 60 });
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'duplicate_sku' });
   });
 });
 
 describe('PUT /produtos/:id and DELETE /produtos/:id', () => {
   it('updates an existing produto', async () => {
-    const app = createApp();
+    const app = createApp({ queue: testQueueDeps });
     const created = await request(app)
       .post('/produtos')
       .send({ sku: 'A-2', nome: 'Teclado', preco: 80 });
@@ -73,7 +97,7 @@ describe('PUT /produtos/:id and DELETE /produtos/:id', () => {
   });
 
   it('returns 404 updating a nonexistent produto', async () => {
-    const app = createApp();
+    const app = createApp({ queue: testQueueDeps });
     const res = await request(app)
       .put('/produtos/00000000-0000-0000-0000-000000000000')
       .send({ preco: 1 });
@@ -81,7 +105,7 @@ describe('PUT /produtos/:id and DELETE /produtos/:id', () => {
   });
 
   it('deletes an existing produto and returns 204', async () => {
-    const app = createApp();
+    const app = createApp({ queue: testQueueDeps });
     const created = await request(app)
       .post('/produtos')
       .send({ sku: 'A-3', nome: 'Monitor', preco: 500 });
@@ -91,15 +115,29 @@ describe('PUT /produtos/:id and DELETE /produtos/:id', () => {
   });
 
   it('returns 404 deleting a nonexistent produto', async () => {
-    const app = createApp();
+    const app = createApp({ queue: testQueueDeps });
     const res = await request(app).delete('/produtos/00000000-0000-0000-0000-000000000000');
     expect(res.status).toBe(404);
+  });
+
+  it('returns 404 updating a produto with a non-UUID id', async () => {
+    const app = createApp({ queue: testQueueDeps });
+    const res = await request(app).put('/produtos/not-a-uuid').send({ preco: 1 });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'produto_not_found' });
+  });
+
+  it('returns 404 deleting a produto with a non-UUID id', async () => {
+    const app = createApp({ queue: testQueueDeps });
+    const res = await request(app).delete('/produtos/not-a-uuid');
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'produto_not_found' });
   });
 });
 
 describe('GET /produtos/search', () => {
   it('returns an empty list with 200 when nothing matches', async () => {
-    const app = createApp({ search: (params) => import('../../src/api/searchClient.js').then((m) =>
+    const app = createApp({ queue: testQueueDeps, search: (params) => import('../../src/api/searchClient.js').then((m) =>
       m.searchProdutos(params, esClient, testIndex)
     ) });
     const res = await request(app).get('/produtos/search').query({ q: 'inexistente' });
@@ -108,8 +146,8 @@ describe('GET /produtos/search', () => {
   });
 
   it('finds a produto end-to-end after the worker indexes it', async () => {
-    worker = createProdutoSyncWorker({ indexName: testIndex } as any);
-    const app = createApp({ search: (params) => import('../../src/api/searchClient.js').then((m) =>
+    worker = createProdutoSyncWorker({ indexName: testIndex, queueName: testQueueName });
+    const app = createApp({ queue: testQueueDeps, search: (params) => import('../../src/api/searchClient.js').then((m) =>
       m.searchProdutos(params, esClient, testIndex)
     ) });
 
@@ -130,8 +168,15 @@ describe('GET /produtos/search', () => {
     expect(filtered.body.items[0].id).toBe(created.body.id);
   });
 
+  it('returns 400 when page/size exceed the elasticsearch result window', async () => {
+    const app = createApp({ queue: testQueueDeps });
+    const res = await request(app).get('/produtos/search').query({ page: 500, size: 100 });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('validation_error');
+  });
+
   it('returns 503 when the search backend is unavailable after retries', async () => {
-    const app = createApp({ search: () => Promise.reject(new SearchUnavailableError()) });
+    const app = createApp({ queue: testQueueDeps, search: () => Promise.reject(new SearchUnavailableError()) });
     const res = await request(app).get('/produtos/search');
     expect(res.status).toBe(503);
     expect(res.body).toEqual({ error: 'search_unavailable' });

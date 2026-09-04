@@ -29,3 +29,10 @@ npm test
 ```
 
 See `docs/superpowers/specs/2026-09-03-busca-produtos-design.md` for the full design.
+
+## Concurrency assumption
+
+The sync worker assumes a single worker process at default BullMQ concurrency (1).
+Running multiple worker replicas or increasing per-worker concurrency can cause
+out-of-order writes to Elasticsearch for the same produto id, since jobs are not
+currently version-guarded.

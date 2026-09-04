@@ -6,11 +6,13 @@ import { runMigrations } from '../../src/db/migrate.js';
 import { createProduto, deleteProduto } from '../../src/repositories/produtoRepository.js';
 import { esClient } from '../../src/es/client.js';
 import { ensureProdutosIndex } from '../../src/es/setup.js';
-import { produtosSyncQueue, enqueueIndex, enqueueDelete } from '../../src/queue/queue.js';
+import { createProdutosSyncQueue, enqueueIndex, enqueueDelete } from '../../src/queue/queue.js';
 import { createProdutoSyncWorker } from '../../src/worker/produtoSyncWorker.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const testIndex = 'produtos_worker_test';
+const testQueueName = 'produtos-sync-worker-test';
+const testQueue = createProdutosSyncQueue(testQueueName);
 let worker: ReturnType<typeof createProdutoSyncWorker>;
 
 async function waitFor(check: () => Promise<boolean>, timeoutMs = 8000): Promise<void> {
@@ -28,7 +30,7 @@ beforeAll(async () => {
     await esClient.indices.delete({ index: testIndex });
   }
   await ensureProdutosIndex(esClient, testIndex);
-  worker = createProdutoSyncWorker({ indexName: testIndex } as any);
+  worker = createProdutoSyncWorker({ indexName: testIndex, queueName: testQueueName });
 });
 
 afterEach(async () => {
@@ -37,8 +39,8 @@ afterEach(async () => {
 
 afterAll(async () => {
   await worker.close();
-  await produtosSyncQueue.obliterate({ force: true });
-  await produtosSyncQueue.close();
+  await testQueue.obliterate({ force: true });
+  await testQueue.close();
   await esClient.indices.delete({ index: testIndex });
   await pool.end();
 });
@@ -46,7 +48,7 @@ afterAll(async () => {
 describe('produto sync worker', () => {
   it('indexes a produto in elasticsearch when an index job runs', async () => {
     const produto = await createProduto({ sku: 'W-1', nome: 'Mouse', preco: 50 });
-    await enqueueIndex(produto.id);
+    await enqueueIndex(produto.id, testQueue);
 
     await waitFor(async () => {
       try {
@@ -60,7 +62,7 @@ describe('produto sync worker', () => {
 
   it('removes a produto from elasticsearch when a delete job runs', async () => {
     const produto = await createProduto({ sku: 'W-2', nome: 'Teclado', preco: 80 });
-    await enqueueIndex(produto.id);
+    await enqueueIndex(produto.id, testQueue);
     await waitFor(async () => {
       try {
         await esClient.get({ index: testIndex, id: produto.id });
@@ -71,7 +73,7 @@ describe('produto sync worker', () => {
     });
 
     await deleteProduto(produto.id);
-    await enqueueDelete(produto.id);
+    await enqueueDelete(produto.id, testQueue);
 
     await waitFor(async () => {
       try {
